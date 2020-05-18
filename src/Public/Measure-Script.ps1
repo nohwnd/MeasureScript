@@ -94,7 +94,7 @@ Function Measure-Script {
     }
 
     $profiler = [Profiler]::new($ScriptBlock.Ast.Extent)
-    $visitor  = [AstVisitor]::new($profiler)
+    $visitor  = [ProfilingAstVisitor]::new($profiler)
     $newAst   = $ScriptBlock.Ast.Visit($visitor)
 
     $MeasureScriptblock = $newAst.GetScriptBlock()

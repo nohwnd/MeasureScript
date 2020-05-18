@@ -1,11 +1,11 @@
 using namespace System.Collections.Generic
 using namespace System.Management.Automation.Language
 
-#region AstVisitor 
-class AstVisitor : ICustomAstVisitor
+#region ProfilingAstVisitor
+class ProfilingAstVisitor : ICustomAstVisitor
 {
     [Profiler]$Profiler = $null
-    AstVisitor([Profiler]$profiler) {
+    ProfilingAstVisitor([Profiler]$profiler) {
         $this.Profiler = $profiler
     }
     [Object] VisitElement([object]$element) {
@@ -27,7 +27,7 @@ class AstVisitor : ICustomAstVisitor
                 $visitedResult = $element.Visit($this)
                 $newElements.add($visitedResult)
             }
-            return $newElements 
+            return $newElements
     }
     [StatementAst[]] VisitStatements([object]$Statements)
     {
@@ -51,8 +51,8 @@ class AstVisitor : ICustomAstVisitor
                             $false
                         )
                     $startLine = [CommandExpressionAst]::new(
-                        $extent, 
-                        $invokeMember, 
+                        $extent,
+                        $invokeMember,
                         $null
                     )
                     $pipe = [PipelineAst]::new($extent, $startLine);
@@ -64,14 +64,14 @@ class AstVisitor : ICustomAstVisitor
                     $expressionAstCollection = [List[ExpressionAst]]::new()
                     $expressionAstCollection.Add([ConstantExpressionAst]::new($extent, $extent.StartLineNumber - 1))
                     $endLine = [CommandExpressionAst]::new(
-                        $extent, 
+                        $extent,
                         [InvokeMemberExpressionAst]::new(
                             $extent,
                             [ConstantExpressionAst]::new($extent, $this.Profiler),
                             [StringConstantExpressionAst]::new($extent, "EndLine", [StringConstantType]::BareWord),
-                            $expressionAstCollection, 
+                            $expressionAstCollection,
                             $false
-                        ), 
+                        ),
                         $null
                     )
                     $pipe = [PipelineAst]::new($extent, $endLine)
@@ -110,7 +110,8 @@ class AstVisitor : ICustomAstVisitor
     {
         $newStatements = $this.VisitStatements($statementBlockAst.Statements)
         $newTraps = $this.VisitElements($statementBlockAst.Traps)
-        return [StatementBlockAst]::new($statementBlockAst.Extent, $newStatements, $newTraps)
+        $traps = if ($newTraps) { $newTraps } else { if ($statementBlockAst.Traps) { $statementBlockAst.Traps } else {  [System.Collections.Generic.List[System.Management.Automation.Language.TrapStatementAst]]@() } }
+        return [StatementBlockAst]::new($statementBlockAst.Extent, $newStatements, $traps)
     }
 
     [object] VisitIfStatement([IfStatementAst] $ifStmtAst)
@@ -132,10 +133,11 @@ class AstVisitor : ICustomAstVisitor
     [object] VisitSwitchStatement([SwitchStatementAst] $switchStatementAst)
     {
         $newCondition = $this.VisitElement($switchStatementAst.Condition)
-        $newClauses = $switchStatementAst.Clauses | ForEach-Object {
-            $newClauseTest = $this.VisitElement($_.Item1)
-            $newStatementBlock = $this.VisitElement($_.Item2)
-            [Tuple[ExpressionAst,StatementBlockAst]]::new($newClauseTest,$newStatementBlock)
+        $newClauses = [System.Collections.Generic.List[System.Tuple[System.Management.Automation.Language.ExpressionAst,System.Management.Automation.Language.StatementBlockAst]]]@()
+        foreach ($clause in $switchStatementAst.Clauses) {
+            $newClauseTest = $this.VisitElement($clause.Item1)
+            $newStatementBlock = $this.VisitElement($clause.Item2)
+            $newClauses.Add([Tuple[ExpressionAst,StatementBlockAst]]::new($newClauseTest,$newStatementBlock))
         }
         $newDefault = $this.VisitElement($switchStatementAst.Default)
         return [SwitchStatementAst]::new($switchStatementAst.Extent, $switchStatementAst.Label,$newCondition,$switchStatementAst.Flags, $newClauses, $newDefault)
@@ -143,9 +145,17 @@ class AstVisitor : ICustomAstVisitor
 
     [object] VisitDataStatement([DataStatementAst] $dataStatementAst)
     {
-        $newBody = $this.VisitElement($dataStatementAst.Body)
-        $newCommandsAllowed = $this.VisitElements($dataStatementAst.CommandsAllowed)
-        return [DataStatementAst]::new($dataStatementAst.Extent, $dataStatementAst.Variable, $newCommandsAllowed, $newBody)
+
+#         Line |
+#    4 |  instrument-script -path /projects/pester/bin/pester.psm1
+#      |  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#      | Exception calling "GetScriptBlock" with "0" argument(s): "At line:9692 char:5 +     @{ +     ~~ Method calls are not allowed in restricted
+#      | language mode or a Data section.  At line:9727 char:5 +     @{ +     ~~ Method calls are not allowed in restricted language mode or a Data
+#      | section."
+        return $dataStatementAst.Copy()
+        # $newBody = $this.VisitElement($dataStatementAst.Body)
+        # $newCommandsAllowed = $this.VisitElements($dataStatementAst.CommandsAllowed)
+        # return [DataStatementAst]::new($dataStatementAst.Extent, $dataStatementAst.Variable, $newCommandsAllowed, $newBody)
     }
 
     [object] VisitForEachStatement([ForEachStatementAst] $forEachStatementAst)
@@ -181,16 +191,55 @@ class AstVisitor : ICustomAstVisitor
 
     [object] VisitCatchClause([CatchClauseAst] $catchClauseAst)
     {
-        $newBody = $this.VisitElement($catchClauseAst.Body)
-        return [CatchClauseAst]::new($catchClauseAst.Extent, $catchClauseAst.CatchTypes, $newBody)
+        $copy = $catchClauseAst.Copy()
+        $newBody = $this.VisitElement($copy.Body)
+        try {
+            return [CatchClauseAst]::new($copy.Extent, $copy.CatchTypes, $newBody)
+        }
+        catch {
+            return $null
+        }
     }
 
     [object] VisitTryStatement([TryStatementAst] $tryStatementAst)
     {
-        $newBody = $this.VisitElement($tryStatementAst.Body)
-        $newCatchClauses = $this.VisitElements($tryStatementAst.CatchClauses)
-        $newFinally = $this.VisitElement($tryStatementAst.Finally)
-        return [TryStatementAst]::new($tryStatementAst.Extent, $newBody, $newCatchClauses, $newFinally)
+        $copy = $tryStatementAst.Copy()
+        $newBody = $this.VisitElement($copy.Body)
+        $newCatchClauses = $this.VisitElements($copy.CatchClauses)
+        try {
+           
+            if ($newCatchClauses) {
+                if ($newCatchClauses -is [System.Management.Automation.Language.CatchClauseAst]) {
+                    # InvalidArgument: Cannot convert the "catch {
+                    #     $rootBlock.OwnPassed = $false
+                    #     $rootBlock.ErrorRecord.Add($_)
+                    # }" value of type "System.Management.Automation.Language.CatchClauseAst" to type "System.Collections.Generic.IEnumerable`1[System.Management.Automation.Language.CatchClauseAst]".
+                    [System.Collections.Generic.IEnumerable[System.Management.Automation.Language.CatchClauseAst]] $catchClauses = [System.Collections.Generic.List[System.Management.Automation.Language.CatchClauseAst]]@($newCatchClauses)
+                } else {
+                    $cs = [System.Collections.Generic.List[System.Management.Automation.Language.CatchClauseAst]]@()
+                    foreach ($c in $newCatchClauses) {
+                        $cs.Add($c)
+                    }
+                    # is there an implicit operator for the single items that takes precendence and causes this issue?
+                    # MetadataError: C:\Projects\temp\measurescript\src\Classes\AstVisitor.class.ps1:212:21
+                    # Line |
+                    #  212 |                      $cs
+                    #      |                      ~~~
+                    #      | Cannot convert the "catch {             $rootBlock.OwnPassed = $false             $rootBlock.ErrorRecord.Add($_)         }" value of type "System.Management.Automation.Language.CatchClauseAst" to type
+                    #      | "System.Collections.Generic.IEnumerable`1[System.Management.Automation.Language.CatchClauseAst]".
+                    [System.Collections.Generic.IEnumerable[System.Management.Automation.Language.CatchClauseAst]] $catchClauses = [System.Collections.Generic.IEnumerable[System.Management.Automation.Language.CatchClauseAst]]$cs
+                }
+            }
+            else {
+                [System.Collections.Generic.IEnumerable[System.Management.Automation.Language.CatchClauseAst]] $catchClauses = $copy.Copy().CatchClauses
+            }
+            $newFinally = $this.VisitElement($copy.Finally)
+            $ast = [TryStatementAst]::new($copy.Extent, $newBody, $catchClauses, $newFinally)
+            return $ast
+        }
+        catch {
+            return $copy
+        }
     }
 
     [object] VisitDoUntilStatement([DoUntilStatementAst] $doUntilStatementAst)
@@ -422,7 +471,16 @@ class AstVisitor : ICustomAstVisitor
 
     [object] VisitExpandableStringExpression([ExpandableStringExpressionAst] $expandableStringExpressionAst)
     {
-        return [ExpandableStringExpressionAst]::new($expandableStringExpressionAst.Extent,$expandableStringExpressionAst.Value,$expandableStringExpressionAst.StringConstantType)
+        try {
+            
+            return [ExpandableStringExpressionAst]::new($expandableStringExpressionAst.Extent,$expandableStringExpressionAst.Value,$expandableStringExpressionAst.StringConstantType)
+        }
+        catch {
+            # "$exceptionName`: $($thisLines[0])" <- fails on the backtick
+            #      | Exception calling ".ctor" with "3" argument(s): "At line:1 char:2 + "$exceptionName: $($thisLines[0])" +  ~~~~~~~~~~~~~~~ Variable reference is not valid. ':' was not followed by a valid variable name character. Consider using ${} to
+            # | delimit the name."
+            return $expandableStringExpressionAst.Copy()
+        }
     }
 
     [object] VisitIndexExpression([IndexExpressionAst] $indexExpressionAst)
